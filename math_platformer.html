@@ -1,0 +1,908 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Math Platformer – Collect & Solve</title>
+    <style>
+      html, body { margin:0; height:100%; background:#111; color:#fff; font-family:system-ui, sans-serif; }
+      #hud { position:absolute; top:40px; left:8px; z-index:3; }
+      canvas { display:block; margin:0 auto; background:#1b1b1b; border:1px solid #333; image-rendering:pixelated; }
+      .panel { position:absolute; right:8px; top:8px; background:#0008; padding:6px 10px; border:1px solid #333; border-radius:6px; font-size:12px; }
+    </style>
+  </head>
+  <body>
+    <a href="index.html" style="position:absolute;left:8px;top:8px;z-index:4;background:#0008;border:1px solid #333;color:#fff;text-decoration:none;padding:6px 10px;border-radius:6px;font-size:12px;">← Menu</a>
+    <div id="hud" style="display:none"></div>
+    <div class="panel" style="display:none"></div>
+    <button id="helpBtn" style="position:absolute;right:8px;top:8px;z-index:5;background:#000a;color:#fff;border:1px solid #333;border-radius:6px;padding:4px 8px;cursor:pointer;font-weight:bold">?</button>
+    <div id="helpPanel" style="display:none;position:absolute;right:8px;top:40px;z-index:5;background:#000c;color:#fff;border:1px solid #333;border-radius:8px;padding:10px 12px;min-width:260px;max-width:320px;font-size:13px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <strong>Controls</strong>
+        <button id="closeHelp" style="background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:2px 6px;cursor:pointer">✕</button>
+      </div>
+      <div id="controlsList"></div>
+      <div style="margin-top:8px;color:#bbb">Click a binding to change it. Settings are saved.</div>
+    </div>
+    <canvas id="c" width="900" height="560"></canvas>
+    <script>
+      const canvas = document.getElementById('c');
+      const ctx = canvas.getContext('2d');
+
+      // World (larger than the canvas for scrolling)
+      const gravity = 1600;
+      const world = { width: 2400, height: 1600 };
+      const groundY = world.height - 64;
+      const startZone = { x: 40, y: groundY - 84, w: 180, h: 84 };
+      const farQuizZone = { x: world.width - 260, y: groundY - 84, w: 180, h: 84 };
+      // Checkpoints
+      const checkpoints = [
+        { x: 240, y: groundY - 80, w: 28, h: 80, active: true },
+        { x: world.width - 260, y: groundY - 80, w: 28, h: 80, active: false },
+      ];
+      let activeCheckpointIndex = 0;
+      const platforms = [
+        // continuous ground across the world (removes holes)
+        { x: 0, y: groundY, w: world.width, h: 24 },
+        // rising left to right
+        { x: 180, y: groundY - 180, w: 200, h: 18 },
+        { x: 520, y: groundY - 260, w: 200, h: 18 },
+        { x: 860, y: groundY - 340, w: 220, h: 18 },
+        { x: 1220, y: groundY - 420, w: 220, h: 18 },
+        { x: 1560, y: groundY - 500, w: 220, h: 18 },
+        { x: 1900, y: groundY - 580, w: 220, h: 18 },
+        // some vertical stacks
+        { x: 300, y: groundY - 320, w: 160, h: 18 },
+        { x: 300, y: groundY - 480, w: 160, h: 18 },
+        { x: 300, y: groundY - 640, w: 160, h: 18 },
+        { x: 1000, y: groundY - 200, w: 160, h: 18 },
+        { x: 1320, y: groundY - 280, w: 180, h: 18 },
+        { x: 1680, y: groundY - 360, w: 180, h: 18 },
+        // high platforms
+        { x: 480, y: groundY - 820, w: 220, h: 18 },
+        { x: 920, y: groundY - 900, w: 220, h: 18 },
+        { x: 1380, y: groundY - 980, w: 220, h: 18 },
+      ];
+
+      // Spikes that hurt only the player
+      const spikes = [
+        { x: 780, y: groundY - 14, w: 70, h: 14 },
+        { x: 1540, y: groundY - 14, w: 70, h: 14 },
+        { x: 2060, y: groundY - 14, w: 70, h: 14 },
+      ];
+
+      // Camera
+      const camera = { x: 0, y: world.height - canvas.height };
+
+      // Input
+      const input = { left:0, right:0, up:0, shoot:0, mx:0, my:0 };
+      let keyBinds = (function(){
+        try { const s = localStorage.getItem('mp_keybinds'); if (s) return JSON.parse(s); } catch(_){}
+        return { left:['a','ArrowLeft'], right:['d','ArrowRight'], up:['w',' ','ArrowUp'], reset:['r'] };
+      })();
+      function saveKeyBinds(){ try{ localStorage.setItem('mp_keybinds', JSON.stringify(keyBinds)); }catch(_){} }
+      function getActionForKey(k){
+        // normalize Space
+        if (k === 'Spacebar') k = ' ';
+        // case-insensitive for letters
+        const kk = k.length === 1 ? k.toLowerCase() : k;
+        for (const act of Object.keys(keyBinds)) {
+          for (const v of keyBinds[act]) { if ((v.length===1?v.toLowerCase():v) === kk) return act; }
+        }
+        return null;
+      }
+      window.addEventListener('keydown', (e) => {
+        if (e.key.toLowerCase() === 'r') { reset(); return; }
+        const act = getActionForKey(e.key);
+        if (act === 'left' || act === 'right' || act === 'up') input[act] = 1;
+      });
+      window.addEventListener('keyup', (e) => {
+        const act = getActionForKey(e.key);
+        if (act === 'left' || act === 'right' || act === 'up') input[act] = 0;
+      });
+      let mouseDown = false;
+      canvas.addEventListener('mousedown', () => { mouseDown = true; input.shoot = 1; });
+      window.addEventListener('mouseup', () => { mouseDown = false; input.shoot = 0; });
+      canvas.addEventListener('mousemove', (e) => {
+        const r = canvas.getBoundingClientRect();
+        input.mx = e.clientX - r.left;
+        input.my = e.clientY - r.top;
+      });
+
+      // Help UI / Rebinding
+      const helpBtn = document.getElementById('helpBtn');
+      const helpPanel = document.getElementById('helpPanel');
+      const closeHelp = document.getElementById('closeHelp');
+      const controlsList = document.getElementById('controlsList');
+      let waitingRebind = null;
+      function renderControlsList(){
+        const rows = [
+          { label:'Move Left', act:'left' },
+          { label:'Move Right', act:'right' },
+          { label:'Jump', act:'up' },
+          { label:'Reset', act:'reset' },
+        ];
+        controlsList.innerHTML = rows.map(r => {
+          const shown = keyBinds[r.act][0] || '';
+          const pretty = shown === ' ' ? 'Space' : shown;
+          return `<div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0;">
+            <span>${r.label}</span>
+            <button data-act="${r.act}" class="rebind" style="background:#222;color:#fff;border:1px solid #444;border-radius:4px;padding:2px 6px;cursor:pointer;min-width:80px;text-align:center">${waitingRebind===r.act?'Press key…':pretty}</button>
+          </div>`;
+        }).join('');
+        for (const b of controlsList.querySelectorAll('button.rebind')) {
+          b.addEventListener('click', (ev) => { waitingRebind = ev.currentTarget.getAttribute('data-act'); renderControlsList(); });
+        }
+      }
+      helpBtn.addEventListener('click', () => { helpPanel.style.display = helpPanel.style.display==='none'?'block':'none'; waitingRebind = null; renderControlsList(); });
+      closeHelp.addEventListener('click', () => { helpPanel.style.display = 'none'; waitingRebind = null; });
+      window.addEventListener('keydown', (e) => {
+        if (!waitingRebind) return;
+        e.preventDefault();
+        let key = e.key;
+        if (key === 'Escape') { waitingRebind = null; renderControlsList(); return; }
+        if (key === ' ') key = ' ';
+        // do not allow modifier-only
+        if (['Shift','Control','Alt','Meta'].includes(key)) return;
+        // set primary slot, keep any secondary defaults (like Arrow keys) after it
+        const secondary = keyBinds[waitingRebind].filter(k => k !== key && !(k.length===1));
+        keyBinds[waitingRebind] = [key, ...secondary];
+        saveKeyBinds();
+        waitingRebind = null;
+        renderControlsList();
+      });
+
+      // Entities
+      function createPlayer() { return { x: 110, y: groundY - 24, vx: 0, vy: 0, w: 24, h: 28, onGround: false, coyote: 0, face: 1, fireCd: 0, hp: 100, dead: false }; }
+      function createEnemy(x, y) {
+        const val = 1 + Math.floor(Math.random() * 19); // 1..20
+        return { x, y, vx: (Math.random()<0.5?-1:1)*(60+Math.random()*40), vy:0, w:24, h:26, hp:3, maxHp:3, val, dir: Math.random()<0.5?-1:1, onGround:false, jumpCd: 0.6 + Math.random()*1.2, shootCd: 1.2 + Math.random()*1.0 };
+      }
+
+      let player = createPlayer();
+      let bullets = []; // {x,y,vx,vy,life}
+      let enemyBullets = []; // {x,y,vx,vy,life}
+      let enemies = [];
+      let spawnTimer = 0;
+      // Powerups
+      const powerups = []; // {type,x,y,w,h,vy,ttl}
+      let powerupSpawnTimer = 5.0;
+      const activeBuffs = { rapid:0, speed:0, shield:0 };
+
+      // Math / Game phase
+      const state = {
+        phase: 'action', // 'action' | 'quiz'
+        collected: [], // numbers from defeated enemies
+        questions: [], // [{a,b,op,answer}]
+        quizIndex: 0,
+        blink: 0,
+        score: 0,
+        time: 0,
+      };
+
+      function reset() {
+        player = createPlayer();
+        bullets.length = 0;
+        enemies.length = 0;
+        spawnTimer = 0;
+        state.phase = 'action';
+        state.collected = [];
+        state.questions = [];
+        state.quizIndex = 0;
+        state.score = 0;
+        state.time = 0;
+      }
+
+      function respawnWithPenalty() {
+        // penalty: lose all numbers and some score
+        state.collected = [];
+        state.questions = [];
+        state.quizIndex = 0;
+        state.phase = 'action';
+        state.score = Math.max(0, Math.floor(state.score * 0.8));
+        // respawn
+        const cp = checkpoints[activeCheckpointIndex] || { x: 110, y: groundY - 24 };
+        player = createPlayer();
+        player.x = cp.x + 8;
+        player.y = cp.y + 4;
+        player.invuln = 2.0;
+        bullets.length = 0;
+        // keep enemies in world to maintain pressure
+      }
+
+      function spawnEnemyWave() {
+        // Spawn enemies across random platforms at varied heights
+        const count = 3 + Math.floor(Math.random() * 3); // 3-5 enemies
+        for (let i = 0; i < count; i++) {
+          const p = platforms[Math.floor(Math.random() * platforms.length)];
+          const margin = 10;
+          const minX = p.x + margin;
+          const maxX = p.x + Math.max(margin, p.w - margin - 24);
+          const x = Math.random() * (maxX - minX) + minX;
+          const y = p.y - 26;
+          enemies.push(createEnemy(x, y));
+        }
+      }
+
+      function spawnBullet() {
+        // Aim using world coordinates (camera offset)
+        const targetX = camera.x + input.mx;
+        const targetY = camera.y + input.my;
+        const aimDir = Math.atan2(targetY - (player.y + player.h/2), targetX - (player.x + player.w/2));
+        const speed = 600;
+        const ox = player.x + player.w/2;
+        const oy = player.y + player.h/2;
+        const maxRange = 240; // pixels (shorter range)
+        bullets.push({ x: ox, y: oy, vx: Math.cos(aimDir)*speed, vy: Math.sin(aimDir)*speed, life: 0.9, ox, oy, maxRange });
+      }
+
+      function rectsOverlap(a,b){ return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+      function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+      function isPointOnPlatform(x, y) {
+        for (const p of platforms) {
+          if (x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h) return true;
+        }
+        return false;
+      }
+      function isPlayerInStartZone() {
+        const a = { x: player.x, y: player.y, w: player.w, h: player.h };
+        const b = { x: startZone.x, y: startZone.y, w: startZone.w, h: startZone.h };
+        return rectsOverlap(a,b);
+      }
+      function isPlayerInFarQuizZone() {
+        const a = { x: player.x, y: player.y, w: player.w, h: player.h };
+        const b = { x: farQuizZone.x, y: farQuizZone.y, w: farQuizZone.w, h: farQuizZone.h };
+        return rectsOverlap(a,b);
+      }
+      function isPlayerInAnyQuizZone() { return isPlayerInStartZone() || isPlayerInFarQuizZone(); }
+
+      function handlePhysics(dt) {
+        // player move
+        const accel = activeBuffs.speed>0 ? 1700 : 1400;
+        const maxSpeed = activeBuffs.speed>0 ? 300 : 230;
+        const ix = input.right - input.left;
+        player.vx += ix * accel * dt;
+        if (ix === 0) player.vx *= 0.85; // friction
+        player.vx = clamp(player.vx, -maxSpeed, maxSpeed);
+        // coyote time countdown
+        if (player.onGround) player.coyote = 0.12; else player.coyote = Math.max(0, player.coyote - dt);
+        // stronger jump and allow during coyote window
+        if (input.up && (player.onGround || player.coyote > 0)) { player.vy = -820; player.onGround = false; player.coyote = 0; }
+        player.vy += gravity * dt;
+        player.x += player.vx * dt;
+        player.y += player.vy * dt;
+        // collide with platforms
+        player.onGround = false;
+        const a = { x: player.x, y: player.y, w: player.w, h: player.h };
+        for (const p of platforms) {
+          const b = { x: p.x, y: p.y, w: p.w, h: p.h };
+          if (!rectsOverlap(a,b)) continue;
+          // resolve minimally
+          const dx1 = (b.x + b.w) - a.x;
+          const dx2 = (a.x + a.w) - b.x;
+          const dy1 = (b.y + b.h) - a.y;
+          const dy2 = (a.y + a.h) - b.y;
+          const px = Math.min(dx1, dx2);
+          const py = Math.min(dy1, dy2);
+          if (px < py) {
+            player.x += (dx1 < dx2 ? dx1 : -dx2);
+            player.vx = 0;
+          } else {
+            player.y += (dy1 < dy2 ? dy1 : -dy2);
+            player.vy = 0;
+            if (dy2 < dy1) player.onGround = true; // on top of platform
+          }
+          a.x = player.x; a.y = player.y;
+        }
+        player.x = clamp(player.x, 0, world.width - player.w);
+        player.y = Math.min(player.y, world.height - player.h);
+
+        // enemies
+        for (const e of enemies) {
+          e.vy += gravity * dt;
+          e.x += e.vx * dt;
+          e.y += e.vy * dt;
+          e.onGround = false;
+          const ea = { x:e.x, y:e.y, w:e.w, h:e.h };
+          for (const p of platforms) {
+            const b = { x:p.x, y:p.y, w:p.w, h:p.h };
+            if (!rectsOverlap(ea,b)) continue;
+            const dx1 = (b.x + b.w) - ea.x;
+            const dx2 = (ea.x + ea.w) - b.x;
+            const dy1 = (b.y + b.h) - ea.y;
+            const dy2 = (ea.y + ea.h) - b.y;
+            const px = Math.min(dx1, dx2);
+            const py = Math.min(dy1, dy2);
+            if (px < py) { e.x += (dx1 < dx2 ? dx1 : -dx2); e.vx *= -1; }
+            else { e.y += (dy1 < dy2 ? dy1 : -dy2); e.vy = 0; if (dy2 < dy1) e.onGround = true; }
+            ea.x = e.x; ea.y = e.y;
+          }
+          // simple patrol flip on world edges
+          if (e.x < 0 || e.x > world.width - e.w) e.vx *= -1;
+          // edge avoidance retained but no holes now due to continuous ground
+          // simple hop behavior
+          e.jumpCd -= dt;
+          if (e.onGround && e.jumpCd <= 0) {
+            e.vy = -520;
+            e.jumpCd = 1.0 + Math.random()*1.5;
+          }
+          // ranged attack at player
+          e.shootCd = Math.max(0, e.shootCd - dt);
+          const pxCenter = player.x + player.w/2, pyCenter = player.y + player.h/2;
+          const exCenter = e.x + e.w/2, eyCenter = e.y + e.h/2;
+          const dxAim = pxCenter - exCenter, dyAim = pyCenter - eyCenter;
+          const dist2 = dxAim*dxAim + dyAim*dyAim;
+          if (!player.dead && dist2 < 420*420 && e.shootCd <= 0) {
+            const angle = Math.atan2(dyAim, dxAim) + (Math.random()*0.3 - 0.15);
+            const spd = 260;
+            enemyBullets.push({ x: exCenter, y: eyCenter, vx: Math.cos(angle)*spd, vy: Math.sin(angle)*spd, life: 1.8 });
+            e.shootCd = 1.2 + Math.random()*0.8;
+          }
+          // damage player on contact
+          const pa = { x: player.x, y: player.y, w: player.w, h: player.h };
+          if (rectsOverlap(ea, pa) && !player.dead) {
+            if (!player.invuln || player.invuln <= 0) {
+              player.hp = Math.max(0, player.hp - 10);
+              player.invuln = 1.0;
+              // knockback
+              const dir = (player.x + player.w/2) < (e.x + e.w/2) ? -1 : 1;
+              player.vx = 260 * dir;
+              player.vy = -300;
+              // drop a collected number if any
+              if (state.collected.length > 0) state.collected.pop();
+              if (player.hp <= 0) { player.dead = true; }
+            }
+          }
+        }
+
+        // bullets
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          const b = bullets[i];
+          b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+          // range limit
+          const dx = b.x - b.ox, dy = b.y - b.oy;
+          if ((dx*dx + dy*dy) > (b.maxRange * b.maxRange)) { bullets.splice(i,1); continue; }
+          if (b.life <= 0 || b.x < -10 || b.x > world.width + 10 || b.y < -10 || b.y > world.height + 10) { bullets.splice(i,1); continue; }
+          // vs platforms
+          for (const p of platforms) {
+            if (b.x > p.x && b.x < p.x + p.w && b.y > p.y && b.y < p.y + p.h) { bullets.splice(i,1); break; }
+          }
+        }
+
+        // enemy bullets
+        for (let i = enemyBullets.length - 1; i >= 0; i--) {
+          const eb = enemyBullets[i];
+          eb.x += eb.vx * dt; eb.y += eb.vy * dt; eb.life -= dt;
+          if (eb.life <= 0 || eb.x < -10 || eb.x > world.width + 10 || eb.y < -10 || eb.y > world.height + 10) { enemyBullets.splice(i,1); continue; }
+          // collide with platforms
+          let hitPlatform = false;
+          for (const p of platforms) {
+            if (eb.x > p.x && eb.x < p.x + p.w && eb.y > p.y && eb.y < p.y + p.h) { hitPlatform = true; break; }
+          }
+          if (hitPlatform) { enemyBullets.splice(i,1); continue; }
+          // collide with player
+          if (!player.dead) {
+            if (eb.x > player.x && eb.x < player.x + player.w && eb.y > player.y && eb.y < player.y + player.h) {
+              if (!player.invuln || player.invuln <= 0) {
+                player.hp = Math.max(0, player.hp - 10);
+                player.invuln = 0.8;
+                player.vx += (Math.random()<0.5?-1:1) * 120;
+                player.vy = -240;
+                if (state.collected.length > 0) state.collected.pop();
+                if (player.hp <= 0) { player.dead = true; }
+              }
+              enemyBullets.splice(i,1);
+              continue;
+            }
+          }
+        }
+
+        // bullet vs enemies
+        for (let i = enemies.length - 1; i >= 0; i--) {
+          const e = enemies[i];
+          for (let j = bullets.length - 1; j >= 0; j--) {
+            const b = bullets[j];
+            if (b.x > e.x && b.x < e.x + e.w && b.y > e.y && b.y < e.y + e.h) {
+              bullets.splice(j,1);
+              e.hp -= 1;
+              if (e.hp <= 0) {
+                // collect number
+                state.collected.push(e.val);
+                state.score += 10;
+                enemies.splice(i,1);
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      function maybeEnterQuiz() {
+        // replaced by start-zone trigger
+      }
+
+      function buildQuizFromCollected() {
+        state.questions.length = 0;
+        // Draw answers without replacement from the collected multiset
+        const pool = [...state.collected]; // multiset
+        const count = Math.min(3, pool.length);
+        let usedMultiplication = false;
+        for (let i = 0; i < count; i++) {
+          if (!pool.length) break;
+          const idx = Math.floor(Math.random() * pool.length);
+          const ans = pool[idx];
+          pool.splice(idx, 1); // consume one instance so we never ask for more than we have
+
+          // Generate an expression that equals ans
+          const weightedOps = ['+','-','×','×','÷'];
+          let op = weightedOps[Math.floor(Math.random()*weightedOps.length)];
+          // ensure at least one multiplication appears
+          if (i === count - 1 && !usedMultiplication) op = '×';
+          let a=0,b=0;
+          if (op === '+') { a = Math.floor(Math.random()*ans); b = ans - a; }
+          else if (op === '-') { a = ans + Math.floor(1 + Math.random()*9); b = a - ans; }
+          else if (op === '×') {
+            let factors = [];
+            for (let k=1;k<=ans;k++) if (ans % k === 0) factors.push([k, ans/k]);
+            if (factors.length) { const p = factors[Math.floor(Math.random()*factors.length)]; a = p[0]; b = p[1]; usedMultiplication = true; }
+            else { op = '+'; a = Math.floor(Math.random()*ans); b = ans - a; }
+          } else if (op === '÷') {
+            b = Math.max(1, Math.floor(1 + Math.random()*9)); a = ans * b;
+          }
+          state.questions.push({ a, b, op, answer: ans });
+        }
+      }
+
+      function answerQuizWithNumber(n) {
+        if (state.phase !== 'quiz') return;
+        const q = state.questions[state.quizIndex];
+        if (!q) return;
+        const correct = n === q.answer;
+        if (correct) {
+          state.score += 25;
+          // consume that number from inventory
+          const idx = state.collected.indexOf(n);
+          if (idx !== -1) state.collected.splice(idx,1);
+          state.quizIndex += 1;
+          state.blink = 0.18;
+          if (state.quizIndex >= state.questions.length) {
+            // quiz complete -> back to action, spawn fresh enemies
+            state.phase = 'action';
+            spawnEnemyWave();
+          }
+        } else {
+          state.score = Math.max(0, state.score - 10);
+          state.blink = 0.25;
+        }
+      }
+
+      function integrate(dt) {
+        state.time += dt;
+        if (state.phase === 'action') {
+          // aim-facing
+          player.face = (input.mx >= player.x + player.w/2) ? 1 : -1;
+
+          // Fire control (disabled in start zone)
+          player.fireCd = Math.max(0, player.fireCd - dt * (activeBuffs.rapid>0 ? 1.8 : 1));
+          const canShoot = !isPlayerInStartZone();
+          if (canShoot && input.shoot && player.fireCd <= 0) { spawnBullet(); player.fireCd = 0.18; input.shoot = mouseDown ? 1 : 0; }
+
+          handlePhysics(dt);
+          if (player.invuln) player.invuln = Math.max(0, player.invuln - dt);
+          activeBuffs.rapid = Math.max(0, activeBuffs.rapid - dt);
+          activeBuffs.speed = Math.max(0, activeBuffs.speed - dt);
+          activeBuffs.shield = Math.max(0, activeBuffs.shield - dt);
+
+          // spikes damage only the player
+          const pa = { x: player.x, y: player.y, w: player.w, h: player.h };
+          for (const s of spikes) {
+            const sa = { x: s.x, y: s.y, w: s.w, h: s.h };
+            if (rectsOverlap(pa, sa)) {
+              if ((!player.invuln || player.invuln <= 0) && activeBuffs.shield<=0) {
+                player.hp = Math.max(0, player.hp - 10);
+                player.invuln = 1.0;
+                player.vy = -360;
+                if (state.collected.length > 0) state.collected.pop();
+                if (player.hp <= 0) { player.dead = true; }
+              }
+              break;
+            }
+          }
+          // spawn powerups periodically on elevated platforms
+          powerupSpawnTimer -= dt;
+          if (powerupSpawnTimer <= 0 && powerups.length < 4) {
+            const elevated = platforms.filter(p => p.y < groundY - 30);
+            if (elevated.length) {
+              const p = elevated[Math.floor(Math.random()*elevated.length)];
+              const x = p.x + 10 + Math.random() * Math.max(10, p.w - 40);
+              const y = p.y - 16;
+              const types = ['heal','shield','rapid','speed','score'];
+              const type = types[Math.floor(Math.random()*types.length)];
+              powerups.push({ type, x, y, w: 16, h: 16, vy: 0, ttl: 30 });
+            }
+            powerupSpawnTimer = 8 + Math.random()*6;
+          }
+          // powerup physics and pickup
+          for (let i=powerups.length-1;i>=0;i--) {
+            const it = powerups[i];
+            it.ttl -= dt; if (it.ttl <= 0) { powerups.splice(i,1); continue; }
+            // light bob
+            it.vy += Math.sin(state.time*2 + i) * 0.2;
+            // pickup
+            if (rectsOverlap(pa, { x: it.x, y: it.y, w: it.w, h: it.h })) {
+              if (it.type === 'heal') { player.hp = Math.min(100, player.hp + 25); }
+              else if (it.type === 'shield') { activeBuffs.shield = 6.0; }
+              else if (it.type === 'rapid') { activeBuffs.rapid = 8.0; }
+              else if (it.type === 'speed') { activeBuffs.speed = 8.0; }
+              else if (it.type === 'score') { state.score += 50; }
+              powerups.splice(i,1);
+            }
+          }
+
+          // checkpoint activation
+          for (let i=0;i<checkpoints.length;i++) {
+            const c = checkpoints[i];
+            const ca = { x: c.x, y: c.y, w: c.w, h: c.h };
+            if (rectsOverlap(pa, ca)) { activeCheckpointIndex = i; c.active = true; }
+          }
+
+          // camera follow (smooth)
+          const targetCamX = clamp(player.x + player.w/2 - canvas.width/2, 0, Math.max(0, world.width - canvas.width));
+          const targetCamY = clamp(player.y + player.h/2 - canvas.height/2, 0, Math.max(0, world.height - canvas.height));
+          camera.x += (targetCamX - camera.x) * Math.min(1, dt * 6);
+          camera.y += (targetCamY - camera.y) * Math.min(1, dt * 6);
+
+          // spawn enemies periodically
+          spawnTimer -= dt;
+          if (spawnTimer <= 0 && enemies.length < 6) { spawnEnemyWave(); spawnTimer = 3.5; }
+
+          // enter quiz when inside any quiz zone and we have any numbers
+          if (isPlayerInAnyQuizZone() && state.collected.length > 0) {
+            state.phase = 'quiz';
+            bullets.length = 0;
+            buildQuizFromCollected();
+            state.quizIndex = 0;
+          }
+        }
+
+        state.blink = Math.max(0, state.blink - dt);
+        if (player.dead) {
+          // brief delay then respawn with penalty
+          if (!state.deathTimer) state.deathTimer = 1.0;
+          state.deathTimer -= dt;
+          if (state.deathTimer <= 0) {
+            state.deathTimer = 0;
+            player.dead = false;
+            respawnWithPenalty();
+          }
+        } else {
+          state.deathTimer = 0;
+        }
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // bg (parallax sky)
+        const g = ctx.createLinearGradient(0,0,0,canvas.height);
+        g.addColorStop(0,'#0e1b3a');
+        g.addColorStop(0.6,'#14284f');
+        g.addColorStop(1,'#1b1f2e');
+        ctx.fillStyle = g; ctx.fillRect(0,0,canvas.width,canvas.height);
+        // distant stars
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        for (let i=0;i<60;i++) {
+          const sx = (i*120 + (state.time*10)) % (canvas.width+120) - 60;
+          const sy = (i*37 % canvas.height) * 0.6;
+          ctx.fillRect(sx, sy, 2, 2);
+        }
+        // far mountains
+        ctx.fillStyle = '#0c1630';
+        const parX1 = - (camera.x * 0.2) % (canvas.width*2);
+        for (let k=-1;k<=1;k++) {
+          const ox = parX1 + k*canvas.width*2;
+          ctx.beginPath();
+          ctx.moveTo(ox - 100, canvas.height);
+          ctx.lineTo(ox + 200, canvas.height - 140);
+          ctx.lineTo(ox + 500, canvas.height);
+          ctx.closePath();
+          ctx.fill();
+          ctx.beginPath();
+          ctx.moveTo(ox + 300, canvas.height);
+          ctx.lineTo(ox + 560, canvas.height - 170);
+          ctx.lineTo(ox + 900, canvas.height);
+          ctx.closePath(); ctx.fill();
+        }
+        // mid hills
+        ctx.fillStyle = '#14213d';
+        const parX2 = - (camera.x * 0.4) % (canvas.width*2);
+        for (let k=-1;k<=1;k++) {
+          const ox = parX2 + k*canvas.width*2;
+          ctx.beginPath();
+          ctx.moveTo(ox - 100, canvas.height);
+          ctx.quadraticCurveTo(ox + 200, canvas.height - 80, ox + 500, canvas.height);
+          ctx.quadraticCurveTo(ox + 800, canvas.height - 60, ox + 1100, canvas.height);
+          ctx.fill();
+        }
+        // clouds
+        const cloudOffset = (state.time * 20) % (canvas.width + 200);
+        function drawCloud(x,y,s) {
+          ctx.fillStyle = 'rgba(255,255,255,0.8)';
+          ctx.beginPath(); ctx.arc(x, y, 16*s, 0, Math.PI*2); ctx.fill();
+          ctx.beginPath(); ctx.arc(x+18*s, y-6*s, 14*s, 0, Math.PI*2); ctx.fill();
+          ctx.beginPath(); ctx.arc(x-18*s, y-6*s, 12*s, 0, Math.PI*2); ctx.fill();
+          ctx.beginPath(); ctx.arc(x+4*s, y+4*s, 10*s, 0, Math.PI*2); ctx.fill();
+        }
+        for (let i=0;i<8;i++) {
+          const x = (i*140 + cloudOffset) - 100;
+          const y = 60 + (i%3)*24;
+          const s = 1 + (i%3)*0.2;
+          drawCloud(x, y, s);
+        }
+
+        // platforms
+        for (const p of platforms) {
+          const sx = p.x - camera.x, sy = p.y - camera.y;
+          const isGround = p.y === groundY;
+          if (isGround) {
+            // dirt body
+            ctx.fillStyle = '#5a3e2b';
+            ctx.fillRect(sx, sy, p.w, p.h);
+            // grass top strip
+            const grassH = Math.min(8, p.h);
+            ctx.fillStyle = '#2d8f39';
+            ctx.fillRect(sx, sy, p.w, grassH);
+            // pixel grass fringe
+            for (let x = 0; x < p.w; x += 4) {
+              const shade = (x/4)%2===0 ? '#36a244' : '#27933a';
+              ctx.fillStyle = shade;
+              ctx.fillRect(sx + x, sy + grassH - 3, 3, 3);
+            }
+          } else {
+            // elevated platforms
+        ctx.fillStyle = '#2b2b2b';
+            ctx.fillRect(sx, sy, p.w, p.h);
+          }
+        }
+
+        // spikes render
+        for (const s of spikes) {
+          const sx = s.x - camera.x, sy = s.y - camera.y;
+          const triW = 14; const count = Math.floor(s.w / triW);
+          for (let i=0;i<count;i++) {
+            const tx = sx + i*triW;
+            ctx.fillStyle = '#bdbdbd';
+            ctx.beginPath();
+            ctx.moveTo(tx, sy + s.h);
+            ctx.lineTo(tx + triW/2, sy);
+            ctx.lineTo(tx + triW, sy + s.h);
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = '#7a7a7a';
+            ctx.stroke();
+          }
+        }
+
+        // player - simple character
+        {
+          const px = player.x - camera.x, py = player.y - camera.y, w = player.w, h = player.h;
+          const cx = px + w/2, cy = py + h/2;
+          // body
+          ctx.fillStyle = '#72e0b8';
+          ctx.fillRect(px+4, py+10, w-8, h-12);
+          // head
+          ctx.fillStyle = '#9af0cf';
+          ctx.beginPath(); ctx.arc(cx, py+10, 10, 0, Math.PI*2); ctx.fill();
+          // eyes (flip with face)
+          ctx.fillStyle = '#0a1b28';
+          const eyeOffset = player.face === 1 ? 4 : -4;
+          ctx.beginPath(); ctx.arc(cx - 4 + eyeOffset, py+8, 2, 0, Math.PI*2); ctx.fill();
+          ctx.beginPath(); ctx.arc(cx + 4 + eyeOffset, py+8, 2, 0, Math.PI*2); ctx.fill();
+          // feet
+          ctx.fillStyle = '#3d8d75';
+          ctx.fillRect(px+3, py+h-4, 8, 3);
+          ctx.fillRect(px+w-11, py+h-4, 8, 3);
+        }
+
+        // enemies - slimes
+        for (const e of enemies) {
+          const ex = e.x - camera.x, ey = e.y - camera.y, ew = e.w, eh = e.h;
+          const cx = ex + ew/2, cy = ey + eh/2;
+          // blob
+          ctx.fillStyle = '#7fb7be';
+          ctx.beginPath();
+          ctx.ellipse(cx, ey + eh/2 - 2, 14, 10, 0, 0, Math.PI*2);
+          ctx.fill();
+          // number
+          ctx.fillStyle = '#091e2b';
+          ctx.font = 'bold 14px system-ui, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(String(e.val), cx, cy + 5);
+          ctx.textAlign = 'left';
+          // hp bar
+          const hpw = 20, hpx = cx - hpw/2, hpy = ey - 8;
+          ctx.fillStyle = '#1a1a1a'; ctx.fillRect(hpx, hpy, hpw, 3);
+          const pct = Math.max(0, e.hp) / e.maxHp;
+          ctx.fillStyle = pct > 0.5 ? '#6fd36f' : (pct > 0.25 ? '#ffbe55' : '#ff6b6b');
+          ctx.fillRect(hpx, hpy, hpw * pct, 3);
+        }
+
+        // bullets
+        ctx.fillStyle = '#f5e663';
+        for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x - camera.x, b.y - camera.y, 3, 0, Math.PI*2); ctx.fill(); }
+        // enemy bullets
+        ctx.fillStyle = '#ff7866';
+        for (const eb of enemyBullets) { ctx.beginPath(); ctx.arc(eb.x - camera.x, eb.y - camera.y, 3, 0, Math.PI*2); ctx.fill(); }
+
+        // powerups render
+        for (const it of powerups) {
+          const x = it.x - camera.x, y = it.y - camera.y;
+          if (it.type === 'heal') { ctx.fillStyle = '#66ff99'; ctx.fillRect(x, y, 16, 16); ctx.fillStyle = '#0b3'; ctx.fillRect(x+7, y+3, 2, 10); ctx.fillRect(x+3, y+7, 10, 2); }
+          else if (it.type === 'shield') { ctx.fillStyle = '#66ccff'; ctx.beginPath(); ctx.arc(x+8, y+8, 8, 0, Math.PI*2); ctx.fill(); ctx.fillStyle = '#0af'; ctx.beginPath(); ctx.arc(x+8, y+8, 5, 0, Math.PI*2); ctx.fill(); }
+          else if (it.type === 'rapid') { ctx.fillStyle = '#ffd166'; ctx.fillRect(x, y, 16, 16); ctx.fillStyle = '#caa042'; ctx.fillRect(x+3, y+6, 10, 4); }
+          else if (it.type === 'speed') { ctx.fillStyle = '#ff66aa'; ctx.fillRect(x, y, 16, 16); ctx.fillStyle = '#c04580'; ctx.beginPath(); ctx.moveTo(x+4, y+12); ctx.lineTo(x+8, y+4); ctx.lineTo(x+12, y+12); ctx.closePath(); ctx.fill(); }
+          else if (it.type === 'score') { ctx.fillStyle = '#dfe7fd'; ctx.fillRect(x, y, 16, 16); ctx.fillStyle = '#5c7cfa'; ctx.font = 'bold 10px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('+', x+8, y+12); ctx.textAlign = 'left'; }
+        }
+
+        // collected inventory bar with wrapping rows
+        ctx.fillStyle = '#0f0f0f';
+        const barH = 60;
+        ctx.fillRect(0, canvas.height-barH, canvas.width, barH);
+        ctx.fillStyle = '#bbb'; ctx.font = '12px system-ui, sans-serif';
+        ctx.fillText('Collected:', 10, canvas.height-44);
+        const slotW = 36; const slotH = 32; const gap = 6; const startX = 100; const startY = canvas.height - barH + 8;
+        const perRow = Math.max(1, Math.floor((canvas.width - startX - 10) / (slotW + gap)));
+        for (let i=0;i<state.collected.length;i++) {
+          const row = Math.floor(i / perRow);
+          const col = i % perRow;
+          const x = startX + col*(slotW+gap);
+          const y = startY + row*(slotH+8);
+          if (y + slotH > canvas.height) break; // clip extra rows
+          ctx.fillStyle = '#2a2a2a'; ctx.fillRect(x, y, slotW, slotH);
+          ctx.fillStyle = '#dfe7fd'; ctx.font = 'bold 14px system-ui, sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText(String(state.collected[i]), x + slotW/2, y + 20);
+          ctx.textAlign = 'left';
+        }
+
+        // HUD
+        ctx.fillStyle = '#bbb'; ctx.font = '14px system-ui, sans-serif';
+        ctx.fillText('Score: ' + state.score, 12, 24);
+        ctx.fillText('Numbers: ' + state.collected.length, 12, 42);
+        // HP bar
+        const hpPct = player.hp / 100;
+        ctx.fillStyle = '#222'; ctx.fillRect(110, 14, 120, 10);
+        ctx.fillStyle = hpPct > 0.5 ? '#4caf50' : (hpPct > 0.25 ? '#ffb300' : '#e53935');
+        ctx.fillRect(110, 14, 120 * hpPct, 10);
+        ctx.strokeStyle = '#444'; ctx.strokeRect(110.5, 14.5, 119, 9);
+        if (player.invuln && player.invuln > 0) {
+          ctx.fillStyle = '#bbb'; ctx.font = '12px system-ui, sans-serif';
+          ctx.fillText('Recovering…', 236, 23);
+        }
+        // Buff icons
+        let bx = 12, by = 58;
+        function drawBuff(label, color){ ctx.fillStyle = color; ctx.fillRect(bx, by, 14, 14); ctx.fillStyle = '#111'; ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.fillText(label, bx+7, by+11); ctx.textAlign = 'left'; bx += 20; }
+        if (activeBuffs.rapid>0) drawBuff('R', '#ffd166');
+        if (activeBuffs.speed>0) drawBuff('S', '#ff66aa');
+        if (activeBuffs.shield>0) drawBuff('D', '#66ccff');
+        // Start zone indicator + no-shoot icon
+        if (state.phase === 'action') {
+          const zx = startZone.x - camera.x, zy = startZone.y - camera.y;
+          ctx.fillStyle = 'rgba(65, 160, 255, 0.08)';
+          ctx.fillRect(zx, zy, startZone.w, startZone.h);
+          ctx.strokeStyle = 'rgba(65,160,255,0.35)';
+          ctx.lineWidth = 2; ctx.strokeRect(zx+0.5, zy+0.5, startZone.w-1, startZone.h-1);
+          // flag pole
+          ctx.fillStyle = '#cfcfcf'; ctx.fillRect(zx + startZone.w - 18, zy - 40, 3, startZone.h + 40);
+          ctx.fillStyle = '#ff5d5d'; ctx.beginPath(); ctx.moveTo(zx + startZone.w - 15, zy - 30); ctx.lineTo(zx + startZone.w - 15 + 22, zy - 24); ctx.lineTo(zx + startZone.w - 15, zy - 18); ctx.closePath(); ctx.fill();
+          if (isPlayerInStartZone() && state.collected.length > 0) {
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui, sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText('Answer stored questions here!', zx + startZone.w/2, zy - 8);
+            ctx.textAlign = 'left';
+          }
+          // no-shoot icon when inside start zone
+          if (isPlayerInStartZone()) {
+            const ix = player.x - camera.x + player.w/2;
+            const iy = player.y - camera.y - 20;
+            ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.beginPath(); ctx.arc(ix, iy, 14, 0, Math.PI*2); ctx.fill();
+            ctx.strokeStyle = '#ff6666'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(ix, iy, 14, 0, Math.PI*2); ctx.stroke();
+            // pistol glyph
+            ctx.strokeStyle = '#ff6666'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(ix-6, iy+2); ctx.lineTo(ix+6, iy+2); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(ix-2, iy+2); ctx.lineTo(ix-2, iy-4); ctx.stroke();
+            // slash
+            ctx.beginPath(); ctx.moveTo(ix-10, iy-10); ctx.lineTo(ix+10, iy+10); ctx.stroke();
+          }
+        }
+
+        // Far quiz zone indicator (quiz allowed here too)
+        if (state.phase === 'action') {
+          const zx = farQuizZone.x - camera.x, zy = farQuizZone.y - camera.y;
+          ctx.fillStyle = 'rgba(120, 255, 120, 0.08)';
+          ctx.fillRect(zx, zy, farQuizZone.w, farQuizZone.h);
+          ctx.strokeStyle = 'rgba(120,255,120,0.35)';
+          ctx.lineWidth = 2; ctx.strokeRect(zx+0.5, zy+0.5, farQuizZone.w-1, farQuizZone.h-1);
+          // marker
+          ctx.fillStyle = '#cfcfcf'; ctx.fillRect(zx + farQuizZone.w - 18, zy - 40, 3, farQuizZone.h + 40);
+          ctx.fillStyle = '#66ff99'; ctx.beginPath(); ctx.moveTo(zx + farQuizZone.w - 15, zy - 30); ctx.lineTo(zx + farQuizZone.w - 15 + 22, zy - 24); ctx.lineTo(zx + farQuizZone.w - 15, zy - 18); ctx.closePath(); ctx.fill();
+          if (isPlayerInFarQuizZone() && state.collected.length > 0) {
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui, sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText('Answer stored questions here!', zx + farQuizZone.w/2, zy - 8);
+            ctx.textAlign = 'left';
+          }
+        }
+
+        // draw checkpoints
+        for (let i=0;i<checkpoints.length;i++) {
+          const c = checkpoints[i];
+          const cx = c.x - camera.x, cy = c.y - camera.y;
+          // pole
+          ctx.fillStyle = '#e0e0e0'; ctx.fillRect(cx + 10, cy, 3, c.h);
+          // base
+          ctx.fillStyle = '#5a3e2b'; ctx.fillRect(cx + 2, cy + c.h - 6, 20, 6);
+          // flag color based on active
+          ctx.fillStyle = i === activeCheckpointIndex ? '#4caf50' : '#d9d9d9';
+          ctx.beginPath(); ctx.moveTo(cx + 12, cy + 8); ctx.lineTo(cx + 12 + 24, cy + 14); ctx.lineTo(cx + 12, cy + 20); ctx.closePath(); ctx.fill();
+        }
+
+        if (state.phase === 'quiz') {
+          // overlay
+          ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+          const q = state.questions[state.quizIndex];
+          ctx.fillStyle = '#fff'; ctx.font = 'bold 28px system-ui, sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText(`${q.a} ${q.op} ${q.b} = ?`, canvas.width/2, canvas.height/2 - 40);
+          ctx.font = '14px system-ui, sans-serif'; ctx.fillStyle = '#bbb';
+          ctx.fillText('Click the correct number from your collected bar', canvas.width/2, canvas.height/2 - 10);
+          ctx.textAlign = 'left';
+        }
+
+        // blink overlay
+        if (state.blink > 0) {
+          ctx.fillStyle = `rgba(255,255,255,${Math.min(0.25, state.blink * 1.2)})`;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // death overlay
+        if (player.dead) {
+          ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#fff'; ctx.font = 'bold 28px system-ui, sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText('You were defeated', canvas.width/2, canvas.height/2 - 20);
+          ctx.font = '14px system-ui, sans-serif'; ctx.fillStyle = '#bbb';
+          ctx.fillText('Respawning…', canvas.width/2, canvas.height/2 + 6);
+          ctx.textAlign = 'left';
+        }
+      }
+
+      // handle inventory clicks for quiz answers (supports wrapping layout)
+      canvas.addEventListener('click', (e) => {
+        if (state.phase !== 'quiz') return;
+        const r = canvas.getBoundingClientRect();
+        const mx = e.clientX - r.left, my = e.clientY - r.top;
+        const barH = 60;
+        const slotW = 36, slotH = 32, gap = 6, startX = 100, startY = canvas.height - barH + 8;
+        const perRow = Math.max(1, Math.floor((canvas.width - startX - 10) / (slotW + gap)));
+        for (let i=0;i<state.collected.length;i++) {
+          const row = Math.floor(i / perRow);
+          const col = i % perRow;
+          const x = startX + col*(slotW+gap);
+          const y = startY + row*(slotH+8);
+          if (y + slotH > canvas.height) break;
+          if (mx >= x && mx <= x+slotW && my >= y && my <= y+slotH) {
+            answerQuizWithNumber(state.collected[i]);
+            break;
+          }
+        }
+      });
+
+      let last = performance.now();
+      function loop(t){
+        const dt = Math.min(0.05, (t - last) / 1000); last = t;
+        integrate(dt);
+        draw();
+        requestAnimationFrame(loop);
+      }
+
+      // boot
+      reset();
+      requestAnimationFrame(loop);
+    </script>
+  </body>
+</html> 
